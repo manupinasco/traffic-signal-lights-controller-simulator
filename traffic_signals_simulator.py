@@ -17,12 +17,8 @@ Dos redes distintas:
 
 Dependencias:   pip install numpy matplotlib networkx
 Estructura:     <proyecto>/six_intersections_signals.py
-                <proyecto>/src/background.png      <- imagen sobre la que se proyecta
+                <proyecto>/background.png      <- imagen sobre la que se proyecta
                 <proyecto>/results/                <- se crea sola (gráficos y grafos)
-
-Uso típico:
-    python six_intersections_signals.py --calibrate        # solo calles sobre la imagen
-    python six_intersections_signals.py --duration 1800    # corre todo y proyecta la simulación
 
 ÍNDICE DEL ARCHIVO
     1. Configuración (todas las constantes PREDETERMINADAS; nada se aprende)
@@ -33,18 +29,6 @@ Uso típico:
     6. Gráficos de resultados (tema azul) y guardado en carpeta
     7. Proyección de la simulación sobre la imagen (con panel de texto en vivo)
     8. Programa principal
-
-SOBRE EL SIGNIFICADO DE t Y T EN EL PAPER (rectificación)
-    * T es el final del horizonte de simulación; t avanza de a Δt (intervalo de actualización).
-    * En cada instante de decisión t se miden las condiciones ACTUALES de cada movimiento
-      (cola, volumen en la ventana reciente, espera, paradas, combustible) y con eso se calcula
-      el peso del nodo (Ec. 1). Con esos pesos cada cruce elige su MWIS. NO se acumula una función
-      objetivo sobre [0, T] ni se "olvida todo" al llegar a T: al llegar a T la simulación termina.
-    * La memoria entre decisiones es solo física (las colas siguen ahí) más la duración del verde
-      del conjunto actual (término θ·d y chequeo de verde máximo), que se reinicia al cambiar de fase.
-    * El verde que "obtuvo" un cruce no es parte del peso, salvo vía ese término d.
-    * Los gráficos de barras SÍ acumulan sobre todo [0, T], pero son métricas de EVALUACIÓN,
-      no lo que optimiza el controlador (que es voraz/miope: sirve lo más congestionado ahora).
 """
 from __future__ import annotations
 
@@ -99,15 +83,11 @@ STREETS = {
     "Av. 25 de Mayo": {"start_x": 255.0,  "start_y": 1510.0, "angle_degrees": -5.0,  "length_pixels": 6900.0, "stretch": 1.0, "lanes_per_direction": 2},
     "Sarmiento":      {"start_x": 255.0,  "start_y": 3268.0, "angle_degrees": -5.6,  "length_pixels": 6800.0, "stretch": 1.0, "lanes_per_direction": 2},
 }
-# Valores ESTIMADOS a ojo desde una captura de 1287 px de ancho (x6.37 para llegar a los 8192 px reales).
-# Benito Juárez es la menos segura. Refinar con:  python six_intersections_signals.py --calibrate
 VERTICAL_STREET_NAMES = ["M. Irigoyen", "Perdriel", "Benito Juárez"]     # derecha -> izquierda
 HORIZONTAL_STREET_NAMES = ["Av. 25 de Mayo", "Sarmiento"]                # arriba -> abajo
 
 # Escala píxel -> metro. Convierte el largo en píxeles de cada tramo a metros reales, de los cuales
 # dependen el tiempo de viaje en flujo libre (largo / velocidad) y cuántos vehículos caben en el tramo.
-# Calibrar midiendo en Google Earth una distancia conocida (p. ej. entre dos horizontales a lo largo de
-# Perdriel) y dividiéndola por su largo en píxeles de ESTA imagen de 8192 px. Estimación inicial: 0.10.
 METERS_PER_PIXEL = 0.10
 MINIMUM_LINK_LENGTH_METERS = 10.0
 
@@ -165,7 +145,7 @@ ENTRY_DEMAND_VEHICLES_PER_HOUR = {
 # mililitros) se eligieron para que ningún término domine: una cola de ~8 vehículos que esperó ~30 s
 # aporta a cada término valores del mismo orden de magnitud.
 OBJECTIVE_WEIGHTS = {
-    "queue_length": 1.0,         # β_Q   · Q  : vehículos detenidos esperando en el movimiento
+    "queue_length": 2.0,         # β_Q   · Q  : vehículos detenidos esperando en el movimiento
     "traffic_volume": 0.5,       # β_vol · Vol: vehículos llegados en la ventana del detector
     "waiting_time": 0.05,        # β_WT  · WT : suma de los segundos que esperan los vehículos de la cola
     "number_of_stops": 2.0,      # β_ST  · ST : paradas promedio de los vehículos de la cola (indica sobresaturación)
@@ -184,8 +164,7 @@ MAXIMUM_GREEN_TERM_WEIGHT = 0.1
 # no responde a cambios de la demanda. El paper encontró 20 s como óptimo en su red.
 UPDATE_INTERVAL_SECONDS = 20.0
 
-# Verde máximo g_max: tope de duración continua del verde de un mismo conjunto de movimientos. Evita que
-# un movimiento muy congestionado deje esperando indefinidamente a los de la calle menor (inanición).
+# Verde máximo g_max: tope de duración continua del verde de un mismo conjunto de movimientos.
 MAXIMUM_GREEN_SECONDS = 60.0
 
 # Influencia b_{u,k} y b_{d,k} del vecindario de orden k (Ec. 4): cuánto pesa el estado de los movimientos
@@ -252,8 +231,8 @@ GREEN_ARROW_COLOR = "#00c853"
 # los 6 de la imagen más 10. La separación entre cruces se toma del promedio de la red de la imagen, así los
 # tramos tienen un largo comparable. Más cruces = más interacción entre semáforos vecinos, que es justamente
 # lo que mide el orden k del grafo de conectividad, y métricas menos sensibles a un solo cruce.
-BENCHMARK_GRID_VERTICAL_STREETS = 4
-BENCHMARK_GRID_HORIZONTAL_STREETS = 4
+BENCHMARK_GRID_VERTICAL_STREETS = 10
+BENCHMARK_GRID_HORIZONTAL_STREETS = 10
 BENCHMARK_VERTICAL_DEMAND_VEHICLES_PER_HOUR = 220.0
 BENCHMARK_HORIZONTAL_DEMAND_VEHICLES_PER_HOUR = 300.0
 
