@@ -2,33 +2,29 @@
 # -*- coding: utf-8 -*-
 """
 ===============================================================================
- CONTROL SEMAFÓRICO DE 6 INTERSECCIONES CON "HIGHER-ORDER CONFLICT GRAPH"
- (Li, Wang, Khattak, Deng - IEEE Trans. Intelligent Transportation Systems, 2022)
+ CONTROL SEMAFÓRICO CFG2 DE 6 INTERSECCIONES
+ Higher-Order Conflict Graph de orden 2
 ===============================================================================
 
 Red simulada: 3 calles verticales (de derecha a izquierda: M. Irigoyen, Perdriel,
 Benito Juárez) x 2 calles horizontales (de arriba a abajo: Av. 25 de Mayo,
 Sarmiento). Todas de doble mano, 6 cruces de 4 patas, 8 movimientos por cruce.
 
-Dos redes distintas:
-  * Red VISUAL (6 cruces, sobre la imagen): solo para proyectar la simulación en pantalla.
-  * Red de COMPARACIÓN (16 cruces = los 6 + 10 más, todos de 4 patas, grilla 4x4 idealizada):
-    sobre esta se calculan las métricas de los gráficos de barras, para que sean más representativas.
+La simulación utiliza únicamente CFG2 sobre los seis cruces y proyecta el
+resultado sobre la imagen de fondo.
 
-Dependencias:   pip install numpy matplotlib networkx
-Estructura:     <proyecto>/six_intersections_signals.py
-                <proyecto>/background.png      <- imagen sobre la que se proyecta
-                <proyecto>/results/                <- se crea sola (gráficos y grafos)
+Dependencias:   pip install numpy matplotlib
+Estructura:     <proyecto>/simulacion_cfg2.py
+                <proyecto>/background.png
 
 ÍNDICE DEL ARCHIVO
-    1. Configuración (todas las constantes PREDETERMINADAS; nada se aprende)
-    2. Clases de las calles: TrafficNetwork (calles, cruces, tramos y movimientos)
-    3. Implementación del algoritmo del paper: ConflictGraph y ConnectivityGraph
-    4. Controladores de semáforos: SignalController (tiempo fijo / SCATS-like / paper)
-    5. Simulación de tráfico: TrafficSimulation
-    6. Gráficos de resultados (tema azul) y guardado en carpeta
-    7. Proyección de la simulación sobre la imagen (con panel de texto en vivo)
-    8. Programa principal
+    1. Configuración
+    2. Red de calles: cruces, tramos y movimientos
+    3. Algoritmo: grafos de conflicto y conectividad
+    4. Controlador CFG2
+    5. Simulación de tráfico
+    6. Proyección gráfica de la simulación sobre la imagen
+    7. Programa principal
 """
 from __future__ import annotations
 
@@ -42,12 +38,10 @@ from collections import deque
 
 import matplotlib.image as matplotlib_image
 import matplotlib.pyplot as plt
-import networkx as networkx_library
 import numpy as np
 from matplotlib.animation import FuncAnimation
 from matplotlib.collections import LineCollection
-from matplotlib.colors import Normalize, to_rgb
-from matplotlib.lines import Line2D
+from matplotlib.colors import Normalize
 from matplotlib.patches import FancyArrowPatch
 
 # =============================================================================
@@ -57,8 +51,7 @@ from matplotlib.patches import FancyArrowPatch
 # ---------- 1.1 Rutas de archivos ----------
 PROJECT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 SOURCE_DIRECTORY = PROJECT_DIRECTORY
-BACKGROUND_IMAGE_FILENAME = "background.png"   # si no existe, se usa la primera imagen de src/
-RESULTS_DIRECTORY = os.path.join(PROJECT_DIRECTORY, "results")
+BACKGROUND_IMAGE_FILENAME = "background.png"   # si no existe, se usa la primera imagen de la carpeta
 FALLBACK_CANVAS_SIZE_PIXELS = (8192, 4006)      # (ancho, alto) usado solo si no hay imagen
 
 # ---------- 1.2 Geometría de las calles (SE AJUSTA A MANO SOBRE LA IMAGEN) ----------
@@ -115,7 +108,7 @@ VEHICLE_SPACE_METERS = 7.5
 
 # Tolerancia anti-bloqueo (gridlock): si un vehículo espera más de estos segundos por un tramo lleno
 # aguas abajo, se lo deja pasar igual. Evita que una cola circular congele la simulación para siempre.
-MAXIMUM_BLOCKED_SECONDS = 90.0
+MAXIMUM_BLOCKED_SECONDS = 180.0
 
 # Ventana del detector: los "lazos detectores" cuentan vehículos llegados a la línea de detención en los
 # últimos N segundos. Es la medida de volumen (Vol) del paper, medida sobre ventana deslizante.
@@ -134,8 +127,8 @@ RESTART_FUEL_MILLILITERS = 4.0
 # extremo de destino. La ruta es el camino más corto por la red. Valores en vehículos por hora por
 # extremo de entrada; --demand-scale los multiplica a todos.
 ENTRY_DEMAND_VEHICLES_PER_HOUR = {
-    "M. Irigoyen": 220, "Perdriel": 220, "Benito Juárez": 220,
-    "Av. 25 de Mayo": 300, "Sarmiento": 300,
+    "M. Irigoyen": 500, "Perdriel": 500, "Benito Juárez": 500,
+    "Av. 25 de Mayo": 500, "Sarmiento": 500,
 }
 
 # ---------- 1.5 Función objetivo (Ec. 1 del paper): constantes PREDETERMINADAS ----------
@@ -145,11 +138,11 @@ ENTRY_DEMAND_VEHICLES_PER_HOUR = {
 # mililitros) se eligieron para que ningún término domine: una cola de ~8 vehículos que esperó ~30 s
 # aporta a cada término valores del mismo orden de magnitud.
 OBJECTIVE_WEIGHTS = {
-    "queue_length": 2.0,         # β_Q   · Q  : vehículos detenidos esperando en el movimiento
-    "traffic_volume": 0.5,       # β_vol · Vol: vehículos llegados en la ventana del detector
-    "waiting_time": 0.05,        # β_WT  · WT : suma de los segundos que esperan los vehículos de la cola
-    "number_of_stops": 2.0,      # β_ST  · ST : paradas promedio de los vehículos de la cola (indica sobresaturación)
-    "fuel_consumption": 0.01,    # β_FC  · FC : mililitros ya gastados en ralentí/rearranque por la cola
+    "queue_length": 1.0,         # β_Q   · Q  : vehículos detenidos esperando en el movimiento
+    "traffic_volume": 2.0,       # β_vol · Vol: vehículos llegados en la ventana del detector
+    "waiting_time": 1,        # β_WT  · WT : suma de los segundos que esperan los vehículos de la cola
+    "number_of_stops": 0.5,      # β_ST  · ST : paradas promedio de los vehículos de la cola (indica sobresaturación)
+    "fuel_consumption": 2.0,    # β_FC  · FC : mililitros ya gastados en ralentí/rearranque por la cola
 }
 MEASUREMENT_ORDER = ["queue_length", "traffic_volume", "waiting_time", "number_of_stops", "fuel_consumption"]
 
@@ -175,29 +168,7 @@ MAXIMUM_GREEN_SECONDS = 60.0
 NEIGHBORHOOD_BASE_INFLUENCE = 0.5
 NEIGHBORHOOD_INFLUENCE_DECAY = 0.5
 
-# ---------- 1.7 Controladores de referencia ----------
-# Tiempo fijo (baseline): ciclo común. Ciclo = tiempo total para recorrer todas las fases una vez.
-# Se reparte en partes iguales entre las fases (incluyendo el despeje) y cada cruce se desfasa
-# (offset) para formar una "onda verde" en el sentido horizontal, suponiendo que los vehículos viajan
-# a velocidad de flujo libre entre cruces: offset = x_cruce / velocidad (mod ciclo).
-FIXED_CYCLE_SECONDS = 90.0
-
-# Adaptativo tipo SCATS/SCOOT: el ciclo se recalcula cada ciclo con la fórmula de Webster
-# C = (1.5·L + 5) / (1 - Y), donde L es el tiempo perdido por ciclo del cruce crítico (n_fases · despeje)
-# e Y la suma de las razones de flujo críticas (flow ratio = demanda / tasa de saturación) de sus fases.
-# MIN/MAX acotan C; MAXIMUM_CYCLE_CHANGE limita cuánto puede cambiar de un ciclo al siguiente (SCOOT lo
-# cambia de a pocos segundos para no desestabilizar); MINIMUM_GREEN garantiza un verde mínimo por fase.
-SCATS_MINIMUM_CYCLE_SECONDS = 60.0
-SCATS_MAXIMUM_CYCLE_SECONDS = 140.0
-SCATS_MAXIMUM_CYCLE_CHANGE_SECONDS = 10.0
-SCATS_MINIMUM_GREEN_SECONDS = 8.0
-
-# ---------- 1.8 Tema visual de resultados (NO de la simulación) ----------
-THEME_BLUE = "#004aad"
-THEME_LIGHT = "#e0e9f9"
-THEME_DARK_TEXT = "#0b2a5c"
-
-# ---------- 1.9 Simulación visual ----------
+# ---------- 1.7 Simulación visual ----------
 # Cada cuántos segundos SIMULADOS se guarda un cuadro para la animación. Un valor mayor genera menos
 # cuadros (menos memoria y menos trabajo al reproducir) a costa de que los semáforos "salten" más.
 FRAME_EVERY_SECONDS = 3.0
@@ -225,17 +196,6 @@ SIGNAL_ARROW_STRAIGHT_OFFSET_PIXELS = 140.0
 SIGNAL_ARROW_LEFT_OFFSET_PIXELS = 260.0
 ARROW_LENGTH_PIXELS = 130.0
 GREEN_ARROW_COLOR = "#00c853"
-
-# ---------- 1.10 Red de COMPARACIÓN de algoritmos (no es la de la imagen) ----------
-# Grilla ortogonal de calles de doble mano. 4 verticales x 4 horizontales = 16 cruces de 4 patas, es decir
-# los 6 de la imagen más 10. La separación entre cruces se toma del promedio de la red de la imagen, así los
-# tramos tienen un largo comparable. Más cruces = más interacción entre semáforos vecinos, que es justamente
-# lo que mide el orden k del grafo de conectividad, y métricas menos sensibles a un solo cruce.
-BENCHMARK_GRID_VERTICAL_STREETS = 10
-BENCHMARK_GRID_HORIZONTAL_STREETS = 10
-BENCHMARK_VERTICAL_DEMAND_VEHICLES_PER_HOUR = 220.0
-BENCHMARK_HORIZONTAL_DEMAND_VEHICLES_PER_HOUR = 300.0
-
 
 # =============================================================================
 # 2. CLASES DE LAS CALLES (red, cruces, tramos y movimientos)
@@ -267,7 +227,7 @@ class TrafficNetwork:
     """
 
     def __init__(self, streets=None, vertical_names=None, horizontal_names=None, entry_demand=None):
-        # Por defecto se usan las calles de la imagen (sección 1.2); la red de comparación pasa las suyas.
+        # Por defecto se usan las calles definidas para la imagen.
         self.streets = streets if streets is not None else STREETS
         self.vertical_names = vertical_names if vertical_names is not None else VERTICAL_STREET_NAMES
         self.horizontal_names = horizontal_names if horizontal_names is not None else HORIZONTAL_STREET_NAMES
@@ -523,122 +483,33 @@ class ConnectivityGraph:
         updated = np.asarray(original_weights, dtype=float).copy()
         for k in range(1, order + 1):
             ring = self.exact_distance_ring(k).astype(float)
-            upstream_mean = (ring.T @ original_weights) / np.maximum(ring.sum(axis=0), 1.0)
-            downstream_mean = (ring @ original_weights) / np.maximum(ring.sum(axis=1), 1.0)
+            upstream_mean = (ring.T @ original_weights) 
+            #/ np.maximum(ring.sum(axis=0), 1.0)
+            downstream_mean = (ring @ original_weights) 
+            #/ np.maximum(ring.sum(axis=1), 1.0)
             influence = NEIGHBORHOOD_BASE_INFLUENCE * NEIGHBORHOOD_INFLUENCE_DECAY ** (k - 1)
             updated += influence * upstream_mean - influence * downstream_mean
         return np.maximum(updated, 0.0)      # un MWIS con pesos negativos no tiene sentido
 
 
-def build_phase_sequence(conflict_graph):
-    """
-    Fases para los controladores cíclicos (tiempo fijo y SCATS-like): cubre todos los movimientos del cruce
-    con conjuntos independientes de forma voraz (greedy), lo que en un cruce de 4 patas da las 4 fases clásicas.
-    """
-    uncovered = set(range(len(conflict_graph.movement_infos)))
-    candidates = conflict_graph.list_all_independent_sets()
-    phases = []
-    while uncovered:
-        best = max(candidates, key=lambda s: (len(uncovered & set(s)), len(s)))
-        phases.append(frozenset(best))
-        uncovered -= set(best)
-    return phases
-
-
 # =============================================================================
-# 4. CONTROLADORES DE SEMÁFOROS
+# 4. CONTROLADOR DE SEMÁFOROS: CFG2
 # =============================================================================
 class SignalController:
-    """
-    Un único controlador con tres modos (así no hay una clase por estrategia):
-      mode = "fixed"          -> tiempo fijo (baseline).
-      mode = "scats"          -> adaptativo tipo SCATS/SCOOT (implementación propia, ver abajo).
-      mode = "conflict_graph" -> algoritmo del paper; `neighborhood_order` = 0 (sin cooperación), 1, 2, 4...
-    El método decide(t, simulation) devuelve, para cada cruce, el conjunto de movimientos (índices locales
-    dentro del cruce) que debe estar en verde ahora.
-    """
+    """Controlador del grafo de conflicto de orden 2 (CFG2)."""
 
-    def __init__(self, mode, neighborhood_order=0):
-        self.mode, self.neighborhood_order = mode, neighborhood_order
-        self.label = {"fixed": "Tiempo fijo (baseline)", "scats": "Adaptativo tipo SCATS/SCOOT"}.get(
-            mode, f"Grafo de conflicto orden {neighborhood_order}")
+    def __init__(self):
+        self.neighborhood_order = 2
+        self.label = "Grafo de conflicto orden 2"
 
     def prepare(self, simulation):
-        network = simulation.network
-        self.phase_sequences = {node: build_phase_sequence(simulation.conflict_graphs[node])
-                                for node in network.signalized_nodes}
-        self.cycle_length_seconds = FIXED_CYCLE_SECONDS
-        self.plan_start_time = 0.0
-        self.slot_durations = {node: [self.cycle_length_seconds / len(sequence)] * len(sequence)
-                               for node, sequence in self.phase_sequences.items()}
-        self.node_x_meters = {node: network.node_positions[node][0] * METERS_PER_PIXEL
-                              for node in network.signalized_nodes}
-        self.minimum_x_meters = min(self.node_x_meters.values())
-        self.next_scats_update_time = FIXED_CYCLE_SECONDS
         self.next_evaluation_time = 0.0
         self.current_desired = {}
 
     def decide(self, time_seconds, simulation):
-        if self.mode == "fixed":
-            return self._cyclic_green_sets(time_seconds)
-        if self.mode == "scats":
-            if time_seconds >= self.next_scats_update_time:
-                self._update_scats_plan(time_seconds, simulation)
-            return self._cyclic_green_sets(time_seconds)
         return self._decide_with_conflict_graph(time_seconds, simulation)
 
-    # ---------- modos cíclicos (fixed y scats) ----------
-    def _cyclic_green_sets(self, time_seconds):
-        desired = {}
-        for node, sequence in self.phase_sequences.items():
-            offset = ((self.node_x_meters[node] - self.minimum_x_meters)
-                      / FREE_FLOW_SPEED_METERS_PER_SECOND) % self.cycle_length_seconds
-            position = (time_seconds - self.plan_start_time - offset) % self.cycle_length_seconds
-            cumulative, chosen = 0.0, len(sequence) - 1
-            for index, duration in enumerate(self.slot_durations[node]):
-                cumulative += duration
-                if position < cumulative:
-                    chosen = index
-                    break
-            desired[node] = sequence[chosen]
-        return desired
-
-    def _update_scats_plan(self, time_seconds, simulation):
-        """
-        Imita a SCATS/SCOOT: (1) ciclo común para toda la región, fijado por el cruce crítico con Webster y
-        acotado en cuánto cambia por vez; (2) splits (reparto del ciclo entre fases) proporcionales a la
-        demanda crítica de cada fase (SCATS iguala grados de saturación; SCOOT mueve el reparto de a 1-4 s);
-        (3) desfases fijos de onda verde; (4) recalculo una vez por ciclo con lo que miden los detectores.
-        """
-        flow_ratios = {}
-        for node, sequence in self.phase_sequences.items():
-            indices = simulation.network.movement_indices_by_node[node]
-            ratios = []
-            for phase in sequence:
-                ratio = 0.05                                   # piso para que ninguna fase desaparezca
-                for local_index in phase:
-                    g = indices[local_index]
-                    measurement = simulation.measure_movement(g, time_seconds)
-                    demand_rate = (measurement[1] + measurement[0]) / DETECTOR_WINDOW_SECONDS   # Vol + cola
-                    ratio = max(ratio, demand_rate / simulation.movement_saturation_rate[g])
-                ratios.append(ratio)
-            flow_ratios[node] = ratios
-        critical_node = max(flow_ratios, key=lambda n: sum(flow_ratios[n]))
-        critical_sum = min(sum(flow_ratios[critical_node]), 0.9)
-        lost_time = CLEARANCE_SECONDS * len(flow_ratios[critical_node])
-        webster_cycle = (1.5 * lost_time + 5.0) / (1.0 - critical_sum)
-        target_cycle = min(max(webster_cycle, SCATS_MINIMUM_CYCLE_SECONDS), SCATS_MAXIMUM_CYCLE_SECONDS)
-        new_cycle = min(max(target_cycle, self.cycle_length_seconds - SCATS_MAXIMUM_CYCLE_CHANGE_SECONDS),
-                        self.cycle_length_seconds + SCATS_MAXIMUM_CYCLE_CHANGE_SECONDS)
-        minimum_slot = SCATS_MINIMUM_GREEN_SECONDS + CLEARANCE_SECONDS
-        for node, ratios in flow_ratios.items():
-            raw = [max(minimum_slot, new_cycle * r / sum(ratios)) for r in ratios]
-            self.slot_durations[node] = [slot * new_cycle / sum(raw) for slot in raw]
-        self.cycle_length_seconds = new_cycle
-        self.plan_start_time = time_seconds
-        self.next_scats_update_time = time_seconds + new_cycle
-
-    # ---------- modo del paper (Algoritmos 1 y 2) ----------
+    # ---------- Algoritmos 1 y 2 del paper ----------
     def _decide_with_conflict_graph(self, time_seconds, simulation):
         if time_seconds < self.next_evaluation_time:
             return self.current_desired
@@ -657,8 +528,9 @@ class SignalController:
                 measurement = simulation.measure_movement(g, time_seconds)
                 base_weights[g] = weight_vector @ measurement + MAXIMUM_GREEN_TERM_WEIGHT * d
 
-        # (b) Mezcla con el vecindario de orden k, Ec. (4) (orden 0 = sin cooperación)
-        final_weights = simulation.connectivity_graph.apply_higher_order_weights(base_weights, self.neighborhood_order)
+        # (b) Mezcla con el vecindario de orden 2, Ec. (4)
+        final_weights = simulation.connectivity_graph.apply_higher_order_weights(
+            base_weights, self.neighborhood_order)
 
         # (c) Cada cruce resuelve su MWIS localmente
         for node in network.signalized_nodes:
@@ -679,7 +551,7 @@ class SignalController:
 # 5. SIMULACIÓN DE TRÁFICO (colas por movimiento, llegadas aleatorias)
 # =============================================================================
 def generate_demand_schedule(network, duration_seconds, random_seed, demand_scale):
-    """Lista ordenada de (instante, ruta). Misma semilla = misma demanda para todas las estrategias."""
+    """Genera una lista ordenada de (instante, ruta) según la demanda aleatoria."""
     random_generator = random.Random(random_seed)
     spawns = []
     for entry in network.boundary_nodes:
@@ -886,228 +758,10 @@ class TrafficSimulation:
 
 
 # =============================================================================
-# 6. GRÁFICOS DE RESULTADOS (tema azul) -> se guardan en RESULTS_DIRECTORY
-# =============================================================================
-def blend_with_white(hex_color, fraction):
-    """Mezcla un color con blanco (fraction=0 -> color original, 1 -> blanco). Genera la paleta del tema."""
-    return tuple((1 - fraction) * c + fraction for c in to_rgb(hex_color))
-
-
-def apply_results_theme():
-    plt.rcParams.update({
-        "figure.facecolor": THEME_LIGHT, "axes.facecolor": "white", "savefig.facecolor": THEME_LIGHT,
-        "axes.edgecolor": THEME_BLUE, "axes.labelcolor": THEME_DARK_TEXT, "axes.titlecolor": THEME_BLUE,
-        "xtick.color": THEME_DARK_TEXT, "ytick.color": THEME_DARK_TEXT, "text.color": THEME_DARK_TEXT,
-        "axes.grid": True, "grid.color": THEME_LIGHT, "grid.linewidth": 1.0,
-        "axes.spines.top": False, "axes.spines.right": False, "font.size": 10,
-        "axes.titlesize": 13, "axes.titleweight": "bold"})
-
-
-PERFORMANCE_METRICS = [   # (clave, etiqueta, ¿más alto es mejor?)
-    ("mean_queue_length_vehicles", "Largo de cola medio\n(Q)", False),
-    ("throughput_completed_vehicles", "Volumen servido\n(Vol)", True),
-    ("mean_waiting_seconds_per_vehicle", "Espera por vehículo\n(WT)", False),
-    ("mean_stops_per_vehicle", "Paradas por vehículo\n(ST)", False),
-    ("mean_fuel_milliliters_per_vehicle", "Combustible por vehículo\n(FC)", False),
-    ("mean_delay_seconds", "Demora media\n(extra)", False),
-]
-
-
-def plot_improvement_over_baseline(results, baseline_key, network_description=""):
-    """Barras agrupadas: mejora porcentual de cada estrategia respecto al tiempo fijo, por variable."""
-    figure, axes = plt.subplots(figsize=(15, 6.8))
-    strategies = [key for key in results if key != baseline_key]
-    shades = [blend_with_white(THEME_BLUE, f) for f in np.linspace(0.0, 0.6, len(strategies))]
-    width = 0.8 / len(strategies)
-    baseline = results[baseline_key]
-    for strategy_index, key in enumerate(strategies):
-        values = []
-        for attribute, _, higher_is_better in PERFORMANCE_METRICS:
-            base_value = baseline[attribute]
-            change = 0.0 if base_value == 0 else (results[key][attribute] - base_value) / base_value * 100.0
-            values.append(change if higher_is_better else -change)
-        positions = np.arange(len(PERFORMANCE_METRICS)) + (strategy_index - (len(strategies) - 1) / 2) * width
-        bars = axes.bar(positions, values, width * 0.92, color=[shades[strategy_index]] * len(values),
-                        edgecolor=THEME_BLUE, linewidth=0.8, label=results[key]["label"])
-        for bar, value in zip(bars, values):
-            axes.annotate(f"{value:+.1f}%", (bar.get_x() + bar.get_width() / 2, value),
-                          xytext=(0, 3 if value >= 0 else -11), textcoords="offset points", ha="center", fontsize=8)
-    axes.axhline(0, color=THEME_BLUE, linewidth=1.5)
-    axes.set_xticks(np.arange(len(PERFORMANCE_METRICS)))
-    axes.set_xticklabels([label for _, label, _ in PERFORMANCE_METRICS])
-    axes.set_ylabel("Mejora respecto al tiempo fijo [%]  (positivo = mejor)")
-    axes.set_title("Rendimiento por variable de la función objetivo vs. baseline de tiempo fijo"
-                   + (f"\n{network_description}" if network_description else ""))
-    axes.legend(ncol=3, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.13))
-    figure.tight_layout()
-    return figure
-
-
-def plot_absolute_metrics(results, baseline_key, network_description=""):
-    """Un panel de barras por variable con el valor absoluto de cada estrategia (línea = baseline)."""
-    figure, axes_grid = plt.subplots(2, 3, figsize=(16, 8))
-    shades = [blend_with_white(THEME_BLUE, f) for f in np.linspace(0.0, 0.6, len(results))]
-    for axes, (attribute, label, _) in zip(axes_grid.flat, PERFORMANCE_METRICS):
-        values = [result[attribute] for result in results.values()]
-        axes.bar(range(len(values)), values, color=shades, edgecolor=THEME_BLUE)
-        axes.axhline(results[baseline_key][attribute], color=THEME_BLUE, linestyle="--", linewidth=1.2)
-        for position, value in enumerate(values):
-            axes.annotate(f"{value:.1f}", (position, value), xytext=(0, 3), textcoords="offset points",
-                          ha="center", fontsize=8)
-        axes.set_xticks(range(len(values)))
-        axes.set_xticklabels(list(results.keys()), fontsize=8)
-        axes.set_title(label.replace("\n", " "), fontsize=11)
-    figure.suptitle("Valores absolutos por estrategia (línea punteada = baseline)"
-                    + (f" — {network_description}" if network_description else ""),
-                    fontsize=14, fontweight="bold", color=THEME_BLUE)
-    figure.tight_layout()
-    return figure
-
-
-def compute_compass_positions(network, node_name, center, radius=1.0):
-    """
-    Posición de los 8 movimientos de un cruce dispuestos como una BRÚJULA: cada pata de entrada ocupa el lado
-    del círculo en que está esa calle (norte arriba, este a la derecha, etc.), y sus dos movimientos quedan
-    juntos: "recto" del lado de la vereda y "izquierda" del lado del eje. Devuelve {índice_global: (x, y)}
-    con y hacia ARRIBA (coordenadas de gráfico, no de imagen).
-    """
-    positions = {}
-    for index in network.movement_indices_by_node[node_name]:
-        info = network.movement_info[index]
-        heading = info["heading"]
-        # La pata de entrada está en dirección -heading; se pasa de coordenadas de imagen (y abajo) a gráfico (y arriba)
-        approach_angle = math.atan2(heading[1], -heading[0])
-        angle = approach_angle + (0.30 if info["kind"] == "straight" else -0.30)
-        positions[index] = (center[0] + radius * math.cos(angle), center[1] + radius * math.sin(angle))
-    return positions
-
-
-def wrap_street_label(street_name, movement_label):
-    words, lines, current = street_name.split(" "), [], ""
-    for word in words:                                   # corta el nombre de la calle en renglones cortos
-        if current and len(current) + 1 + len(word) > 9:
-            lines.append(current)
-            current = word
-        else:
-            current = f"{current} {word}".strip()
-    lines.append(current)
-    return "\n".join(lines + [movement_label])
-
-
-def draw_conflict_cluster(axes, network, conflict_graph, node_name, center, node_size, font_size, edge_alpha=1.0):
-    """
-    Dibuja el grafo de conflicto de UN cruce. Aristas sólidas = conflicto; punteadas = compatibles (forman una
-    fase). Color del nodo = pata de entrada. Lo usan tanto el gráfico de conflicto como el de conectividad, para
-    que se vean idénticos. Devuelve {índice_global: (x, y)}.
-    """
-    global_indices = network.movement_indices_by_node[node_name]
-    infos = conflict_graph.movement_infos
-    positions = compute_compass_positions(network, node_name, center)
-    approaches = sorted({info["from"] for info in infos})
-    shades = [blend_with_white(THEME_BLUE, f) for f in (0.0, 0.25, 0.5, 0.7)]
-    for i in range(len(infos)):
-        for j in range(i + 1, len(infos)):
-            (x1, y1), (x2, y2) = positions[global_indices[i]], positions[global_indices[j]]
-            if conflict_graph.conflict_matrix[i, j]:
-                axes.plot([x1, x2], [y1, y2], color=THEME_BLUE, linewidth=1.5, alpha=0.55 * edge_alpha, zorder=2)
-            else:
-                axes.plot([x1, x2], [y1, y2], color=blend_with_white(THEME_BLUE, 0.35), linewidth=2.6,
-                          linestyle="--", alpha=edge_alpha, zorder=2)
-    for local_index, info in enumerate(infos):
-        shade_index = approaches.index(info["from"]) % len(shades)
-        x, y = positions[global_indices[local_index]]
-        axes.scatter([x], [y], s=node_size, color=shades[shade_index], edgecolor=THEME_BLUE, linewidth=1.6, zorder=3)
-        axes.text(x, y, wrap_street_label(info["street"], info["label"]), ha="center", va="center",
-                  fontsize=font_size, fontweight="bold", zorder=4,
-                  color="white" if shade_index < 2 else THEME_DARK_TEXT)
-    axes.text(center[0], center[1] + 1.38, node_name, ha="center", va="bottom", fontsize=12,
-              fontweight="bold", color=THEME_BLUE)
-    return positions
-
-
-def plot_conflict_graph(network, conflict_graph, node_name):
-    """Grafo de conflicto de UN cruce (8 movimientos). Cada nodo tiene 5 conflictos y 2 compatibles."""
-    figure, axes = plt.subplots(figsize=(9.5, 9.5))
-    axes.grid(False)
-    draw_conflict_cluster(axes, network, conflict_graph, node_name, (0.0, 0.0), node_size=3600, font_size=8)
-    axes.legend(handles=[Line2D([0], [0], color=THEME_BLUE, lw=1.8, label="conflicto (no pueden ir juntos)"),
-                         Line2D([0], [0], color=blend_with_white(THEME_BLUE, 0.35), lw=2.6, ls="--",
-                                label="compatibles (forman una fase)")],
-                loc="lower center", bbox_to_anchor=(0.5, -0.02), frameon=False, ncol=2)
-    axes.set_xlim(-1.6, 1.6)
-    axes.set_ylim(-1.55, 1.85)
-    axes.set_aspect("equal")
-    axes.set_axis_off()
-    axes.set_title("Grafo de conflicto (nodos dispuestos como brújula: cada pata en su lado de la calle)")
-    figure.tight_layout()
-    return figure
-
-
-def plot_connectivity_graph(network, connectivity_graph, conflict_graphs, target_node, previous_node):
-    """
-    Idéntico al grafo de conflicto, pero con DOS cruces: el objetivo y el anterior (vecino). Se agregan flechas
-    gruesas entre movimientos de uno y otro cuando A[i, j] = 1, es decir cuando los vehículos que salen del
-    movimiento i entran directamente al movimiento j. El cruce anterior se ubica del lado donde realmente está.
-    """
-    if (previous_node, target_node) not in network.links:
-        raise ValueError(f"'{previous_node}' y '{target_node}' no son cruces contiguos (no hay tramo entre ellos).")
-    toward_previous = network.node_positions[previous_node] - network.node_positions[target_node]
-    toward_previous = np.array([toward_previous[0], -toward_previous[1]])            # imagen -> gráfico
-    toward_previous = toward_previous / np.linalg.norm(toward_previous)
-    target_center, previous_center = np.array([0.0, 0.0]), toward_previous * 4.6
-
-    figure, axes = plt.subplots(figsize=(17, 9))
-    axes.grid(False)
-    cluster_style = dict(node_size=2700, font_size=7, edge_alpha=0.45)
-    previous_positions = draw_conflict_cluster(axes, network, conflict_graphs[previous_node], previous_node,
-                                               previous_center, **cluster_style)
-    target_positions = draw_conflict_cluster(axes, network, conflict_graphs[target_node], target_node,
-                                             target_center, **cluster_style)
-    previous_indices = network.movement_indices_by_node[previous_node]
-    target_indices = network.movement_indices_by_node[target_node]
-    adjacency = connectivity_graph.adjacency_matrix
-    all_positions = {**previous_positions, **target_positions}
-    for first_indices, second_indices in ((previous_indices, target_indices), (target_indices, previous_indices)):
-        for i in first_indices:
-            for j in second_indices:
-                if adjacency[i, j]:
-                    axes.add_patch(FancyArrowPatch(all_positions[i], all_positions[j], arrowstyle="-|>",
-                                                   mutation_scale=17, linewidth=2.2, color=THEME_DARK_TEXT,
-                                                   shrinkA=30, shrinkB=30, connectionstyle="arc3,rad=0.14",
-                                                   zorder=6))
-    axes.legend(handles=[Line2D([0], [0], color=THEME_BLUE, lw=1.8, label="conflicto (dentro de un cruce)"),
-                         Line2D([0], [0], color=blend_with_white(THEME_BLUE, 0.35), lw=2.6, ls="--",
-                                label="compatibles (dentro de un cruce)"),
-                         Line2D([0], [0], color=THEME_DARK_TEXT, lw=2.4, marker=">", markersize=8,
-                                label="el movimiento de origen puede llevar al de destino (A[i,j] = 1)")],
-                loc="lower center", bbox_to_anchor=(0.5, -0.02), frameon=False, ncol=3)
-    low = np.minimum(target_center, previous_center) - 1.6
-    high = np.maximum(target_center, previous_center) + np.array([1.6, 1.9])
-    axes.set_xlim(low[0], high[0])
-    axes.set_ylim(low[1], high[1])
-    axes.set_aspect("equal")
-    axes.set_axis_off()
-    axes.set_title(f"Grafo de conectividad: {previous_node}  ⇄  {target_node}")
-    figure.tight_layout()
-    return figure
-
-
-def save_result_figures(figures, show=False):
-    """Guarda cada figura en RESULTS_DIRECTORY. Si show es False (por defecto) las cierra: no se muestran."""
-    os.makedirs(RESULTS_DIRECTORY, exist_ok=True)
-    for name, figure in figures.items():
-        path = os.path.join(RESULTS_DIRECTORY, f"{name}.png")
-        figure.savefig(path, dpi=170)
-        print(f"  guardado: {path}")
-        if not show:
-            plt.close(figure)
-
-
-# =============================================================================
-# 7. PROYECCIÓN DE LA SIMULACIÓN SOBRE LA IMAGEN
+# 6. PROYECCIÓN DE LA SIMULACIÓN SOBRE LA IMAGEN
 # =============================================================================
 def load_background_image():
-    """Carga src/<BACKGROUND_IMAGE_FILENAME> (o la primera imagen de src/). Devuelve (imagen|None, ancho, alto)."""
+    """Carga la imagen de fondo (o la primera imagen disponible). Devuelve (imagen|None, ancho, alto)."""
     path = os.path.join(SOURCE_DIRECTORY, BACKGROUND_IMAGE_FILENAME)
     if not os.path.exists(path):
         candidates = sorted(sum((glob.glob(os.path.join(SOURCE_DIRECTORY, ext))
@@ -1256,36 +910,6 @@ def run_live_simulation_view(network, result, duration_seconds, interval_millise
     return animation
 
 
-# =============================================================================
-# 8. PROGRAMA PRINCIPAL
-# =============================================================================
-def build_benchmark_network(reference_network):
-    """
-    Red de COMPARACIÓN: grilla ortogonal de BENCHMARK_GRID_VERTICAL_STREETS x BENCHMARK_GRID_HORIZONTAL_STREETS
-    calles de doble mano (4 x 4 = 16 cruces de 4 patas = los 6 de la imagen + 10). La separación entre cruces es
-    el promedio de los tramos cruce-a-cruce de la red de la imagen. No usa la imagen: solo sirve para métricas.
-    """
-    signalized = set(reference_network.signalized_nodes)
-    spacings = [link["length_meters"] for (a, b), link in reference_network.links.items()
-                if a in signalized and b in signalized]
-    spacing = float(np.mean(spacings)) / METERS_PER_PIXEL          # separación media en píxeles
-    columns, rows = BENCHMARK_GRID_VERTICAL_STREETS, BENCHMARK_GRID_HORIZONTAL_STREETS
-    streets, vertical_names, horizontal_names, entry_demand = {}, [], [], {}
-    for i in range(columns):
-        name = f"V{i + 1}"
-        streets[name] = {"start_x": spacing * (1 + i), "start_y": 0.0, "angle_degrees": 90.0,
-                         "length_pixels": spacing * (rows + 1), "stretch": 1.0, "lanes_per_direction": 2}
-        vertical_names.append(name)
-        entry_demand[name] = BENCHMARK_VERTICAL_DEMAND_VEHICLES_PER_HOUR
-    for j in range(rows):
-        name = f"H{j + 1}"
-        streets[name] = {"start_x": 0.0, "start_y": spacing * (1 + j), "angle_degrees": 0.0,
-                         "length_pixels": spacing * (columns + 1), "stretch": 1.0, "lanes_per_direction": 2}
-        horizontal_names.append(name)
-        entry_demand[name] = BENCHMARK_HORIZONTAL_DEMAND_VEHICLES_PER_HOUR
-    return TrafficNetwork(streets, vertical_names, horizontal_names, entry_demand)
-
-
 def build_graphs(network):
     """Un grafo de conflicto por cruce y el grafo de conectividad de toda la red."""
     conflict_graphs = {node: ConflictGraph([network.movement_info[i] for i in network.movement_indices_by_node[node]])
@@ -1293,84 +917,49 @@ def build_graphs(network):
     return conflict_graphs, ConnectivityGraph(network)
 
 
-def make_controller(strategy_key):
-    """'fixed', 'scats' o 'cg<k>' (grafo de conflicto de orden k) -> SignalController nuevo."""
-    if strategy_key in ("fixed", "scats"):
-        return SignalController(strategy_key)
-    return SignalController("conflict_graph", int(strategy_key[2:]))
-
-
+# =============================================================================
+# 7. PROGRAMA PRINCIPAL
+# =============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="Tiempo fijo vs SCATS-like vs grafo de conflicto")
+    parser = argparse.ArgumentParser(description="Simulación de semáforos CFG2 en 6 intersecciones")
     parser.add_argument("--duration", type=int, default=1800, help="T: duración simulada en segundos")
     parser.add_argument("--seed", type=int, default=7, help="semilla de la demanda aleatoria")
     parser.add_argument("--demand-scale", type=float, default=1.0, help="multiplicador de la demanda")
-    parser.add_argument("--orders", type=int, nargs="+", default=[0, 1, 2, 4], help="órdenes del grafo de conflicto")
-    parser.add_argument("--animate", default="cg2", help="estrategia a proyectar: fixed, scats, cg<k> o none")
     parser.add_argument("--animation-interval-ms", type=int, default=DEFAULT_ANIMATION_INTERVAL_MILLISECONDS,
                         help="milisegundos entre cuadros (mayor = más lenta y liviana)")
-    parser.add_argument("--graph-intersection", default="Perdriel × Av. 25 de Mayo",
-                        help="cruce cuyos grafos de conflicto y conectividad se dibujan")
-    parser.add_argument("--previous-intersection", default="Benito Juárez × Av. 25 de Mayo",
-                        help="cruce contiguo (anterior) que se suma en el grafo de conectividad")
-    parser.add_argument("--show-figures", action="store_true", help="además de guardar, mostrar los gráficos")
     parser.add_argument("--calibrate", action="store_true", help="solo muestra las calles sobre la imagen")
     arguments = parser.parse_args()
 
-    visual_network = TrafficNetwork()                       # 6 cruces sobre la imagen
+    # La simulación se ejecuta directamente sobre los 6 cruces de la imagen, usando CFG2.
+    network = TrafficNetwork()
     if arguments.calibrate:
-        show_calibration_view(visual_network)
+        show_calibration_view(network)
         return
-    visual_conflict_graphs, visual_connectivity_graph = build_graphs(visual_network)
 
-    # ---------- Métricas de comparación: red de 16 cruces ----------
-    benchmark_network = build_benchmark_network(visual_network)
-    benchmark_conflict_graphs, benchmark_connectivity_graph = build_graphs(benchmark_network)
-    description = (f"red de comparación: {len(benchmark_network.signalized_nodes)} cruces de 4 patas "
-                   f"(grilla {BENCHMARK_GRID_VERTICAL_STREETS}×{BENCHMARK_GRID_HORIZONTAL_STREETS}), T = {arguments.duration} s")
-    print(f"Red de comparación: {len(benchmark_network.signalized_nodes)} cruces | "
-          f"movimientos: {len(benchmark_network.movement_info)}")
-    benchmark_demand = generate_demand_schedule(benchmark_network, arguments.duration, arguments.seed,
-                                                arguments.demand_scale)
-    print(f"Vehículos generados (misma demanda para todas las estrategias): {len(benchmark_demand)}")
+    conflict_graphs, connectivity_graph = build_graphs(network)
+    demand = generate_demand_schedule(network, arguments.duration, arguments.seed, arguments.demand_scale)
+    print(f"Red simulada: {len(network.signalized_nodes)} cruces | movimientos: {len(network.movement_info)}")
+    print(f"Vehículos generados: {len(demand)}")
 
-    strategy_keys = ["fixed", "scats"] + [f"cg{order}" for order in arguments.orders]
-    results = {}
-    for key in strategy_keys:
-        results[key] = TrafficSimulation(benchmark_network, benchmark_conflict_graphs, benchmark_connectivity_graph,
-                                         benchmark_demand, make_controller(key), arguments.duration).run()
-        r = results[key]
-        print(f"[{key:>5}] cola={r['mean_queue_length_vehicles']:6.1f}  servidos={r['throughput_completed_vehicles']:5.0f}  "
-              f"espera={r['mean_waiting_seconds_per_vehicle']:6.1f}s  paradas={r['mean_stops_per_vehicle']:4.2f}  "
-              f"fuel={r['mean_fuel_milliliters_per_vehicle']:6.1f}ml")
+    result = TrafficSimulation(
+        network,
+        conflict_graphs,
+        connectivity_graph,
+        demand,
+        SignalController(),
+        arguments.duration,
+        record_frames=True
+    ).run()
 
-    # ---------- Gráficos: se GUARDAN en results/ y no se muestran (salvo --show-figures) ----------
-    apply_results_theme()
-    save_result_figures({
-        "01_improvement_vs_baseline": plot_improvement_over_baseline(results, "fixed", description),
-        "02_absolute_metrics": plot_absolute_metrics(results, "fixed", description),
-        "03_conflict_graph": plot_conflict_graph(visual_network, visual_conflict_graphs[arguments.graph_intersection],
-                                                 arguments.graph_intersection),
-        "04_connectivity_graph": plot_connectivity_graph(visual_network, visual_connectivity_graph,
-                                                         visual_conflict_graphs, arguments.graph_intersection,
-                                                         arguments.previous_intersection)},
-        show=arguments.show_figures)
+    print(f"[CFG2] cola={result['mean_queue_length_vehicles']:.1f}  "
+          f"servidos={result['throughput_completed_vehicles']:.0f}  "
+          f"espera={result['mean_waiting_seconds_per_vehicle']:.1f}s  "
+          f"paradas={result['mean_stops_per_vehicle']:.2f}  "
+          f"fuel={result['mean_fuel_milliliters_per_vehicle']:.1f}ml")
 
-    # ---------- Simulación visual: solo la estrategia elegida, sobre la red de 6 cruces de la imagen ----------
-    animations = []
-    if arguments.animate != "none":
-        if arguments.animate not in results:
-            print(f"--animate '{arguments.animate}' no existe. Opciones: {strategy_keys}")
-        else:
-            visual_demand = generate_demand_schedule(visual_network, arguments.duration, arguments.seed,
-                                                     arguments.demand_scale)
-            visual_result = TrafficSimulation(visual_network, visual_conflict_graphs, visual_connectivity_graph,
-                                              visual_demand, make_controller(arguments.animate), arguments.duration,
-                                              record_frames=True).run()
-            animations.append(run_live_simulation_view(visual_network, visual_result, arguments.duration,
-                                                       arguments.animation_interval_ms))
-    if animations or arguments.show_figures:
-        plt.show()
+    # La proyección, el panel y la animación conservan el diseño original.
+    animation = run_live_simulation_view(network, result, arguments.duration, arguments.animation_interval_ms)
+    plt.show()
 
 
 if __name__ == "__main__":
