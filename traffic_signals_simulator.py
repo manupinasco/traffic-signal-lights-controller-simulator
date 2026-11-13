@@ -1,31 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-===============================================================================
- CONTROL SEMAFÓRICO CFG2 DE 6 INTERSECCIONES
- Higher-Order Conflict Graph de orden 2
-===============================================================================
-
-Red simulada: 3 calles verticales (de derecha a izquierda: M. Irigoyen, Perdriel,
-Benito Juárez) x 2 calles horizontales (de arriba a abajo: Av. 25 de Mayo,
-Sarmiento). Todas de doble mano, 6 cruces de 4 patas, 8 movimientos por cruce.
-
-La simulación utiliza únicamente CFG2 sobre los seis cruces y proyecta el
-resultado sobre la imagen de fondo.
-
-Dependencias:   pip install numpy matplotlib
-Estructura:     <proyecto>/simulacion_cfg2.py
-                <proyecto>/background.png
-
-ÍNDICE DEL ARCHIVO
-    1. Configuración
-    2. Red de calles: cruces, tramos y movimientos
-    3. Algoritmo: grafos de conflicto y conectividad
-    4. Controlador CFG2
-    5. Simulación de tráfico
-    6. Proyección gráfica de la simulación sobre la imagen
-    7. Programa principal
-"""
 from __future__ import annotations
 
 import argparse
@@ -45,30 +17,14 @@ from matplotlib.colors import Normalize
 from matplotlib.patches import FancyArrowPatch
 
 # =============================================================================
-# 1. CONFIGURACIÓN (todo predeterminado; se edita acá)
+# 1. CONFIGURACIÓN
 # =============================================================================
 
 # ---------- 1.1 Rutas de archivos ----------
 PROJECT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 SOURCE_DIRECTORY = PROJECT_DIRECTORY
-BACKGROUND_IMAGE_FILENAME = "background.png"   # si no existe, se usa la primera imagen de la carpeta
-FALLBACK_CANVAS_SIZE_PIXELS = (8192, 4006)      # (ancho, alto) usado solo si no hay imagen
+BACKGROUND_IMAGE_FILENAME = "background.png"
 
-# ---------- 1.2 Geometría de las calles (SE AJUSTA A MANO SOBRE LA IMAGEN) ----------
-# Todas las coordenadas están en PÍXELES de la imagen: x crece hacia la derecha e y hacia ABAJO
-# (convención de imágenes). Cada calle es una recta definida por estos parámetros:
-#
-#   start_x, start_y : punto donde empieza la calle (su "inicio"; también es nodo de entrada/salida).
-#   angle_degrees    : dirección de la calle medida desde el eje x hacia abajo. 0 = apunta a la derecha,
-#                      90 = apunta hacia abajo, 180 = izquierda, 270 = arriba. Para una calle "vertical"
-#                      lo normal es ~90 y para una "horizontal" ~0; ángulos distintos inclinan la calle.
-#   length_pixels    : largo base de la calle en píxeles, medido desde el inicio.
-#   stretch          : factor de estiramiento. El largo efectivo es length_pixels * stretch. Sirve para
-#                      alargar/acortar una calle sin tocar su largo base (1.0 = sin cambios). Los cruces
-#                      se calculan como intersección de las rectas, así que al estirar o girar una calle
-#                      los cruces y tramos se recalculan solos. Debe seguir cortando a las perpendiculares.
-#   lanes_per_direction : carriles por sentido. Define la capacidad de almacenamiento del tramo y,
-#                      junto con la tasa de saturación, cuántos vehículos por segundo pasan en verde.
 STREETS = {
     "M. Irigoyen":    {"start_x": 5700.0, "start_y": 60.0,   "angle_degrees": 78.9,  "length_pixels": 3950.0, "stretch": 1.0, "lanes_per_direction": 2},
     "Perdriel":       {"start_x": 3580.0, "start_y": 60.0,   "angle_degrees": 81.0,  "length_pixels": 3930.0, "stretch": 1.0, "lanes_per_direction": 2},
@@ -79,117 +35,46 @@ STREETS = {
 VERTICAL_STREET_NAMES = ["M. Irigoyen", "Perdriel", "Benito Juárez"]     # derecha -> izquierda
 HORIZONTAL_STREET_NAMES = ["Av. 25 de Mayo", "Sarmiento"]                # arriba -> abajo
 
-# Escala píxel -> metro. Convierte el largo en píxeles de cada tramo a metros reales, de los cuales
-# dependen el tiempo de viaje en flujo libre (largo / velocidad) y cuántos vehículos caben en el tramo.
 METERS_PER_PIXEL = 0.10
 MINIMUM_LINK_LENGTH_METERS = 10.0
 
 # ---------- 1.3 Dinámica del tráfico ----------
 SIMULATION_STEP_SECONDS = 1.0
-
-# Velocidad de flujo libre: la que alcanza un vehículo sin cola ni semáforo. Determina el tiempo mínimo
-# que tarda en recorrer cada tramo. 10 m/s = 36 km/h, razonable en una ciudad.
 FREE_FLOW_SPEED_METERS_PER_SECOND = 10.0
-
-# Tasa de saturación (saturation flow rate): máximo caudal de vehículos que puede descargar un carril
-# con luz verde sostenida, cuando hay cola. 0.45 veh/s equivale a 1620 veh/h por carril. Un movimiento
-# usa max(1, carriles-1) carriles (no todos los carriles sirven a cada movimiento).
 SATURATION_FLOW_VEHICLES_PER_SECOND_PER_LANE = 0.45
-
-# Tiempo de despeje (clearance / tiempo perdido): segundos en que ningún movimiento tiene verde al
-# cambiar de fase, para que los vehículos que quedaron dentro del cruce lo desalojen. Es amarillo (3 s)
-# más todo-rojo (2 s), como en el paper. Cada cambio de fase "pierde" este tiempo de capacidad.
 CLEARANCE_SECONDS = 5.0
-
-# Espacio por vehículo en cola (largo del auto + separación). Con el largo y los carriles del tramo
-# define su capacidad de almacenamiento (storage capacity): cuántos vehículos caben antes de que la
-# cola se desborde hacia atrás (spillback) y bloquee al cruce de aguas arriba.
 VEHICLE_SPACE_METERS = 7.5
-
-# Tolerancia anti-bloqueo (gridlock): si un vehículo espera más de estos segundos por un tramo lleno
-# aguas abajo, se lo deja pasar igual. Evita que una cola circular congele la simulación para siempre.
-MAXIMUM_BLOCKED_SECONDS = 180.0
-
-# Ventana del detector: los "lazos detectores" cuentan vehículos llegados a la línea de detención en los
-# últimos N segundos. Es la medida de volumen (Vol) del paper, medida sobre ventana deslizante.
-DETECTOR_WINDOW_SECONDS = 60.0
-
-# Modelo de combustible simplificado (el paper usa el modelo de Zhao et al. por tipo de vehículo).
-# Ralentí: consumo con el motor encendido y el vehículo detenido. Crucero: consumo circulando a flujo libre.
-# Rearranque: consumo extra por frenar y volver a acelerar tras cada parada.
+MAXIMUM_BLOCKED_SECONDS = 900.0
 IDLE_FUEL_MILLILITERS_PER_SECOND = 0.35
 CRUISE_FUEL_MILLILITERS_PER_SECOND = 0.80
 RESTART_FUEL_MILLILITERS = 4.0
 
 # ---------- 1.4 Demanda ----------
-# Los vehículos aparecen en los extremos de cada calle como un proceso de Poisson (llegadas
-# independientes, con tiempo entre llegadas exponencial) a la tasa indicada, y eligen al azar un
-# extremo de destino. La ruta es el camino más corto por la red. Valores en vehículos por hora por
-# extremo de entrada; --demand-scale los multiplica a todos.
 ENTRY_DEMAND_VEHICLES_PER_HOUR = {
     "M. Irigoyen": 500, "Perdriel": 500, "Benito Juárez": 500,
     "Av. 25 de Mayo": 500, "Sarmiento": 500,
 }
 
-# ---------- 1.5 Función objetivo (Ec. 1 del paper): constantes PREDETERMINADAS ----------
-# Peso de un movimiento m en el instante t:
-#   w = β_Q·Q + β_vol·Vol + β_WT·WT + β_ST·ST + β_FC·FC + θ·d
-# Los β son la importancia relativa de cada medición. Como las unidades difieren (vehículos, segundos,
-# mililitros) se eligieron para que ningún término domine: una cola de ~8 vehículos que esperó ~30 s
-# aporta a cada término valores del mismo orden de magnitud.
+# ---------- 1.5 Función objetivo local (Ec. 1) ----------
 OBJECTIVE_WEIGHTS = {
-    "queue_length": 1.0,         # β_Q   · Q  : vehículos detenidos esperando en el movimiento
-    "traffic_volume": 2.0,       # β_vol · Vol: vehículos llegados en la ventana del detector
-    "waiting_time": 1,        # β_WT  · WT : suma de los segundos que esperan los vehículos de la cola
-    "number_of_stops": 0.5,      # β_ST  · ST : paradas promedio de los vehículos de la cola (indica sobresaturación)
-    "fuel_consumption": 2.0,    # β_FC  · FC : mililitros ya gastados en ralentí/rearranque por la cola
+    "autos": 1.0,       # θ1: cantidad de vehículos en cola
+    "paradas": 0.5,     # θ2: paradas promedio por vehículo en cola
+    "nafta": 2.0,       # θ3: ml consumidos por la cola
+    "delta_verde": 0.1, # θ4: incentivo por no haber agotado el verde máximo
 }
-MEASUREMENT_ORDER = ["queue_length", "traffic_volume", "waiting_time", "number_of_stops", "fuel_consumption"]
-
-# θ (theta): peso del término de verde máximo θ·d. d = g_max - (duración actual del verde del
-# movimiento) (Ec. 2). Los movimientos que están en verde pierden peso a medida que se acercan al verde
-# máximo (menos ganas de extenderlos), y los que están en rojo reciben el bonus completo θ·g_max.
-MAXIMUM_GREEN_TERM_WEIGHT = 0.1
+LOCAL_MEASUREMENT_ORDER = ["autos", "paradas", "nafta"]
 
 # ---------- 1.6 Parámetros del grafo de conflicto de orden k ----------
-# Intervalo de actualización Δt: cada cuántos segundos se recalculan los pesos y el MWIS. Si es muy
-# chico se pierde capacidad en despejes (cada cambio de fase cuesta CLEARANCE_SECONDS); si es muy grande
-# no responde a cambios de la demanda. El paper encontró 20 s como óptimo en su red.
 UPDATE_INTERVAL_SECONDS = 20.0
-
-# Verde máximo g_max: tope de duración continua del verde de un mismo conjunto de movimientos.
 MAXIMUM_GREEN_SECONDS = 60.0
-
-# Influencia b_{u,k} y b_{d,k} del vecindario de orden k (Ec. 4): cuánto pesa el estado de los movimientos
-# aguas arriba (suman: llega mucho tráfico, conviene darle verde al objetivo) y aguas abajo (restan: el
-# destino está congestionado, conviene no sumar más cola). El paper pide que el orden 1 pese más que los
-# siguientes; se usa un decaimiento exponencial b_k = BASE * DECAY^(k-1) (el escenario "Exponentially"
-# de su Tabla III, escalado por BASE). Se usa el mismo valor aguas arriba que aguas abajo.
-NEIGHBORHOOD_BASE_INFLUENCE = 0.5
-NEIGHBORHOOD_INFLUENCE_DECAY = 0.5
+UPSTREAM_BASE_INFLUENCE = 0.5
+DOWNSTREAM_BASE_INFLUENCE = 0.5
+NEIGHBORHOOD_INFLUENCE_DECAY = 0.5 # cuánto decae del orden k al orden k+1
 
 # ---------- 1.7 Simulación visual ----------
-# Cada cuántos segundos SIMULADOS se guarda un cuadro para la animación. Un valor mayor genera menos
-# cuadros (menos memoria y menos trabajo al reproducir) a costa de que los semáforos "salten" más.
 FRAME_EVERY_SECONDS = 3.0
-
-# Intervalo, en milisegundos REALES, entre cuadros al reproducir. Mayor = animación más lenta y liviana
-# (con 150 ms y cuadros cada 3 s simulados, se reproduce ~20 veces más rápido que el tiempo real).
 DEFAULT_ANIMATION_INTERVAL_MILLISECONDS = 150
-
-# Ancho máximo (px) con el que se dibuja el fondo. La imagen original se submuestrea a este ancho solo para
-# DIBUJAR; las coordenadas siguen en píxeles de la imagen original.
 MAXIMUM_BACKGROUND_WIDTH_PIXELS = 1600
-
-# Geometría de las flechas de semáforo, todo en píxeles de la imagen original. Cada sentido de circulación
-# se dibuja como una banda de color corrida LANE_OFFSET_PIXELS a la derecha del eje de la calle. Las dos
-# flechas de cada pata (recto e izquierda) van FUERA de esa banda, del lado de la vereda, para no taparla:
-#   STOP_LINE_DISTANCE_PIXELS : distancia del centro del cruce a donde empieza la flecha. Debe ser mayor que
-#                               el ancho de la calle transversal para que la flecha no invada el cruce.
-#   SIGNAL_ARROW_STRAIGHT_OFFSET_PIXELS / SIGNAL_ARROW_LEFT_OFFSET_PIXELS : separación lateral (hacia la
-#                               derecha del sentido de marcha) de la flecha "recto" y de la "izquierda".
-#                               La de izquierda está más afuera porque su flecha se inclina hacia la calle.
-#   ARROW_LENGTH_PIXELS       : largo de cada flecha.
 LANE_OFFSET_PIXELS = 45.0
 STOP_LINE_DISTANCE_PIXELS = 230.0
 SIGNAL_ARROW_STRAIGHT_OFFSET_PIXELS = 140.0
@@ -198,7 +83,7 @@ ARROW_LENGTH_PIXELS = 130.0
 GREEN_ARROW_COLOR = "#00c853"
 
 # =============================================================================
-# 2. CLASES DE LAS CALLES (red, cruces, tramos y movimientos)
+# 2. CLASES DE LAS CALLES
 # =============================================================================
 def get_street_geometry(parameters):
     """Devuelve (punto_inicial, vector_dirección_unitario, largo_efectivo_en_píxeles) de una calle."""
@@ -227,25 +112,23 @@ class TrafficNetwork:
     """
 
     def __init__(self, streets=None, vertical_names=None, horizontal_names=None, entry_demand=None):
-        # Por defecto se usan las calles definidas para la imagen.
         self.streets = streets if streets is not None else STREETS
         self.vertical_names = vertical_names if vertical_names is not None else VERTICAL_STREET_NAMES
         self.horizontal_names = horizontal_names if horizontal_names is not None else HORIZONTAL_STREET_NAMES
         self.entry_demand = entry_demand if entry_demand is not None else ENTRY_DEMAND_VEHICLES_PER_HOUR
-        self.node_positions = {}          # nombre de nodo -> np.array([x, y]) en píxeles
-        self.signalized_nodes = []        # nombres de los cruces
-        self.boundary_nodes = []          # nombres de los extremos de calle
-        self.boundary_street = {}         # extremo -> calle a la que pertenece
-        self.links = {}                   # (desde, hacia) -> dict(length_meters, lanes, street)
-        self.outgoing = {}                # nodo -> vecinos a los que se puede ir
-        self.incoming = {}                # nodo -> vecinos desde los que se llega
-        self.movement_info = []           # índice global -> dict con datos del movimiento
-        self.movement_index = {}          # (cruce, desde, hacia) -> índice global (incluye giros a la derecha)
-        self.movement_indices_by_node = {}  # cruce -> lista de índices globales (8 por cruce)
+        self.node_positions = {}
+        self.signalized_nodes = []
+        self.boundary_nodes = []
+        self.boundary_street = {}
+        self.links = {}
+        self.outgoing = {}
+        self.incoming = {}
+        self.movement_info = []
+        self.movement_index = {}
+        self.movement_indices_by_node = {}
         self._build_nodes_and_links()
         self._build_movements()
 
-    # ---------- construcción de nodos y tramos ----------
     def _add_node(self, name, position, is_signalized, street=""):
         self.node_positions[name] = np.asarray(position, dtype=float)
         self.outgoing[name], self.incoming[name] = [], []
@@ -265,17 +148,13 @@ class TrafficNetwork:
         self.incoming[to_node].append(from_node)
 
     def _build_nodes_and_links(self):
-        crossings_by_street = {name: [] for name in self.streets}   # calle -> [(distancia_desde_inicio, cruce)]
+        crossings_by_street = {name: [] for name in self.streets}
         for vertical_name in self.vertical_names:
             for horizontal_name in self.horizontal_names:
                 vertical_start, vertical_direction, vertical_length = get_street_geometry(self.streets[vertical_name])
                 horizontal_start, horizontal_direction, horizontal_length = get_street_geometry(self.streets[horizontal_name])
-                # Intersección de dos rectas: vertical_start + t·dv = horizontal_start + s·dh
                 t, s = np.linalg.solve(np.column_stack([vertical_direction, -horizontal_direction]),
                                        horizontal_start - vertical_start)
-                if not (0 <= t <= vertical_length and 0 <= s <= horizontal_length):
-                    raise ValueError(f"'{vertical_name}' y '{horizontal_name}' no se cortan dentro de su largo: "
-                                     f"alargá alguna (length_pixels o stretch) o corregí su posición/ángulo.")
                 node_name = f"{vertical_name} × {horizontal_name}"
                 self._add_node(node_name, vertical_start + vertical_direction * t, True)
                 crossings_by_street[vertical_name].append((t, node_name))
@@ -286,11 +165,10 @@ class TrafficNetwork:
             self._add_node(start_node, start, False, street_name)
             self._add_node(end_node, start + direction * length, False, street_name)
             chain = [start_node] + [node for _, node in sorted(crossings_by_street[street_name])] + [end_node]
-            for first_node, second_node in zip(chain, chain[1:]):     # doble mano
+            for first_node, second_node in zip(chain, chain[1:]):
                 self._add_link(first_node, second_node, street_name)
                 self._add_link(second_node, first_node, street_name)
 
-    # ---------- construcción de movimientos ----------
     def _build_movements(self):
         for node in self.signalized_nodes:
             node_position = self.node_positions[node]
@@ -298,17 +176,16 @@ class TrafficNetwork:
             for from_node in self.incoming[node]:
                 from_street = self.links[(from_node, node)]["street"]
                 heading = node_position - self.node_positions[from_node]
-                heading = heading / np.linalg.norm(heading)           # sentido en que viaja el vehículo
+                heading = heading / np.linalg.norm(heading)
                 created_by_kind, right_turn_exits = {}, []
                 for to_node in self.outgoing[node]:
                     if to_node == from_node:
-                        continue                                       # sin retornos en U
+                        continue
                     exit_direction = self.node_positions[to_node] - node_position
                     exit_direction = exit_direction / np.linalg.norm(exit_direction)
                     if self.links[(node, to_node)]["street"] == from_street:
                         kind = "straight"
                     else:
-                        # Producto cruz en coordenadas de imagen (y hacia abajo): negativo = giro a la izquierda
                         cross = heading[0] * exit_direction[1] - heading[1] * exit_direction[0]
                         kind = "left" if cross < 0 else "right"
                     if kind == "right":
@@ -322,12 +199,11 @@ class TrafficNetwork:
                     self.movement_index[(node, from_node, to_node)] = index
                     created_by_kind[kind] = index
                     indices_of_node.append(index)
-                for to_node in right_turn_exits:                       # derecha comparte la cola de "recto"
+                for to_node in right_turn_exits:
                     self.movement_index[(node, from_node, to_node)] = created_by_kind["straight"]
-                    self.movement_info[created_by_kind["straight"]]["exits"].append(to_node)   # y también su salida
+                    self.movement_info[created_by_kind["straight"]]["exits"].append(to_node)
             self.movement_indices_by_node[node] = indices_of_node
 
-    # ---------- utilidades ----------
     def shortest_routes_from(self, origin):
         """Dijkstra por largo de tramo. Devuelve {destino: [nodos de la ruta]}."""
         distances, previous, heap = {origin: 0.0}, {}, [(0.0, origin)]
@@ -349,15 +225,10 @@ class TrafficNetwork:
         return routes
 
     def compute_stop_line_positions(self):
-        """
-        Posición (en píxeles) donde empieza la flecha de cada movimiento: sobre la calle de entrada, a
-        STOP_LINE_DISTANCE_PIXELS del centro del cruce y corrida hacia la derecha del sentido de marcha, FUERA
-        de la banda de color de la calle (del lado de la vereda). "recto" y "izquierda" quedan lado a lado.
-        """
         positions = np.zeros((len(self.movement_info), 2))
         for index, info in enumerate(self.movement_info):
             heading = info["heading"]
-            right_vector = np.array([-heading[1], heading[0]])        # derecha en coordenadas de imagen
+            right_vector = np.array([-heading[1], heading[0]])
             lateral = (SIGNAL_ARROW_STRAIGHT_OFFSET_PIXELS if info["kind"] == "straight"
                        else SIGNAL_ARROW_LEFT_OFFSET_PIXELS)
             positions[index] = (self.node_positions[info["node"]] - heading * STOP_LINE_DISTANCE_PIXELS
@@ -372,15 +243,15 @@ class ConflictGraph:
     """
     Grafo de conflicto de UN cruce (Sección III-B del paper).
       * Nodo  = un movimiento del cruce (8 en un cruce de 4 patas).
-      * Arista = los dos movimientos NO pueden tener verde a la vez.
-    Reglas de conflicto (equivalen al grafo de la Fig. 3 del paper: cada nodo tiene 5 aristas):
-      - Misma pata de entrada: no hay conflicto (divergen desde la misma calle).
-      - Calles perpendiculares: siempre conflicto (se cruzan).
-      - Patas opuestas de la misma calle: conflicto solo entre "izquierda" y "recto" (la izquierda cruza
-        al tránsito que viene de frente); dos "recto" o dos "izquierda" opuestas son compatibles.
-    Un conjunto independiente (independent set) es un conjunto de nodos sin aristas entre sí, es decir,
-    movimientos que pueden estar en verde simultáneamente (una "fase"). El MWIS (maximum weight
-    independent set) es el conjunto independiente de mayor suma de pesos.
+      * Arista = los dos movimientos NO pueden tener verde a la vez, porque SE CRUZAN, van a la
+        misma salida u obstaculizan el giro del otro.
+
+    Reglas de conflicto:
+      - Misma pata de entrada: compatibles (divergen desde la misma calle).
+      - Calles perpendiculares: siempre conflicto (se cruzan o comparten salida).
+      - Patas opuestas de la misma calle: conflicto SALVO que ambos sean "recto".
+        Izquierda vs izquierda opuestas se cruzan en el medio del cruce -> conflicto.
+        Izquierda vs recto opuesto: la izquierda cruza/obstaculiza al que viene de frente -> conflicto.
     """
 
     def __init__(self, movement_infos):
@@ -397,13 +268,14 @@ class ConflictGraph:
     @staticmethod
     def _movements_conflict(first, second):
         if first["from"] == second["from"]:
-            return False
+            return False                                   # misma pata: divergen, no se cruzan
         if first["street"] != second["street"]:
-            return True
-        return first["kind"] != second["kind"]
+            return True                                    # calles perpendiculares: conflicto
+        # Patas opuestas de la misma calle: solo dos "recto" circulan en paralelo sin tocarse.
+        return not (first["kind"] == "straight" and second["kind"] == "straight")
 
     def list_all_independent_sets(self):
-        """FUERZA BRUTA: enumera todos los conjuntos independientes no vacíos (con 8 nodos son pocos)."""
+        """FUERZA BRUTA: enumera todos los conjuntos independientes no vacíos."""
         if self._independent_sets is None:
             found, count = [], len(self.movement_infos)
 
@@ -416,35 +288,48 @@ class ConflictGraph:
 
             extend([], 0)
             self._independent_sets = found
-            self._membership_matrix = np.zeros((len(found), count))     # fila = conjunto, columna = nodo
+            self._membership_matrix = np.zeros((len(found), count))
             for row, independent_set in enumerate(found):
                 self._membership_matrix[row, list(independent_set)] = 1.0
         return self._independent_sets
 
-    def find_maximum_weight_independent_set(self, weights, preferred_set=None):
+    def find_maximum_weight_independent_set(self, weights, preferred_set=None, forbidden_nodes=None):
         """
-        MWIS por fuerza bruta: puntúa todos los conjuntos independientes (suma de pesos) y devuelve el
-        mejor. Se suma un epsilon por nodo para preferir conjuntos más grandes si hay pesos en cero.
-        Si `preferred_set` (el conjunto actualmente en verde) empata con el mejor, se lo conserva:
-        equivale a "extender el verde" del Algoritmo 1 del paper.
+        MWIS por fuerza bruta usando la matriz de pertenencia de conjuntos independientes.
+        `forbidden_nodes` permite retirar temporalmente nodos del problema sin modificar el grafo.
+        Si `preferred_set` empata con el máximo, se conserva para extender el verde actual.
         """
         independent_sets = self.list_all_independent_sets()
+        weights = np.asarray(weights, dtype=float)
+        forbidden = set(forbidden_nodes or ())
+
+        valid_rows = [row for row, candidate in enumerate(independent_sets)
+                      if not forbidden.intersection(candidate)]
+        if not valid_rows:
+            return frozenset()
+
         epsilon = 1e-6
-        scores = self._membership_matrix @ (np.asarray(weights, dtype=float) + epsilon)
-        best_row = int(np.argmax(scores))
-        if preferred_set:
+        valid_membership = self._membership_matrix[valid_rows]
+        scores = valid_membership @ (weights + epsilon)
+        best_position = int(np.argmax(scores))
+        best_set = frozenset(independent_sets[valid_rows[best_position]])
+
+        if preferred_set and not forbidden.intersection(preferred_set):
             preferred_score = sum(weights[i] + epsilon for i in preferred_set)
-            if preferred_score >= scores[best_row] - 1e-9:
+            if preferred_score >= scores[best_position] - 1e-9:
                 return frozenset(preferred_set)
-        return frozenset(independent_sets[best_row])
+        return best_set
 
 
 class ConnectivityGraph:
     """
-    Grafo de conectividad de TODA la red (Sección III-D), como matriz de adyacencia A.
-    Nodo = movimiento (de cualquier cruce). A[i, j] = 1 si los vehículos que salen del movimiento i
-    entran directamente al movimiento j del cruce contiguo (la salida de i es la entrada de j).
-    Con esto se define el vecindario de orden k: movimientos a distancia (cantidad de aristas) <= k.
+    Grafo de conectividad de toda la red, expresado como matriz de adyacencia A.
+
+      A[i, j] = 1 si desde el movimiento j se puede llegar directamente al movimiento i.
+    Por lo tanto, las FILAS son movimientos de destino y las COLUMNAS son movimientos de origen.
+
+      A^n @ W     -> suma los pesos de los vecinos aguas arriba de cada movimiento.
+      (A.T)^n @ W -> suma los pesos de los vecinos aguas abajo de cada movimiento.
     """
 
     def __init__(self, network):
@@ -453,43 +338,45 @@ class ConnectivityGraph:
         self.adjacency_matrix = np.zeros((count, count), dtype=int)
         for i, upstream in enumerate(self.movement_info):
             for j, downstream in enumerate(self.movement_info):
-                # i alimenta a j si alguna de las salidas de i (recto, derecha o izquierda) es el cruce de j
-                # y j entra justamente desde el cruce de i
                 if downstream["node"] in upstream["exits"] and downstream["from"] == upstream["node"]:
-                    self.adjacency_matrix[i, j] = 1
-        self._reachable_cache = {0: np.eye(count, dtype=bool)}
-
-    def reachable_within_hops(self, order):
-        """Ec. (3): min((A + I)^k, 1). Matriz booleana: ¿hay camino de i a j con a lo sumo k saltos?"""
-        if order not in self._reachable_cache:
-            previous = self.reachable_within_hops(order - 1).astype(int)
-            step = self.adjacency_matrix + np.eye(len(self.adjacency_matrix), dtype=int)
-            self._reachable_cache[order] = (previous @ step) > 0
-        return self._reachable_cache[order]
-
-    def exact_distance_ring(self, order):
-        """Movimientos a distancia EXACTAMENTE k (para poder pesar cada orden con su propia influencia)."""
-        return self.reachable_within_hops(order) & ~self.reachable_within_hops(order - 1)
+                    self.adjacency_matrix[j, i] = 1
+        self.last_normalization_factor = 1.0
 
     def apply_higher_order_weights(self, original_weights, order):
         """
-        Ec. (4): W~ = W + Σ_k b_u,k · (vecinos aguas ARRIBA de orden k) − Σ_k b_d,k · (aguas ABAJO de orden k).
-        Con A[i,j] = 1 de i hacia j, los aguas ABAJO de m son los de su fila (A @ W) y los aguas ARRIBA los
-        de su columna (A.T @ W). (El paper rotula al revés ese término, pero la lógica que describe es esta:
-        mucho tráfico aguas arriba -> darle verde; congestión aguas abajo -> limitarlo.)
-        Cada término se PROMEDIA por cantidad de vecinos del anillo para que la escala no dependa de cuántos
-        hay (el paper suma). Con order = 0 devuelve los pesos originales (sin cooperación).
+        Ec. (2): W_tilde = W + nrm * [sum(U_n * A^n * W) - sum(D_n * (A.T)^n * W)].
+        nrm es un único factor global: el inverso del máximo grado ponderado que
+        aparece en cualquiera de las dos direcciones y órdenes considerados.
         """
-        updated = np.asarray(original_weights, dtype=float).copy()
-        for k in range(1, order + 1):
-            ring = self.exact_distance_ring(k).astype(float)
-            upstream_mean = (ring.T @ original_weights) 
-            #/ np.maximum(ring.sum(axis=0), 1.0)
-            downstream_mean = (ring @ original_weights) 
-            #/ np.maximum(ring.sum(axis=1), 1.0)
-            influence = NEIGHBORHOOD_BASE_INFLUENCE * NEIGHBORHOOD_INFLUENCE_DECAY ** (k - 1)
-            updated += influence * upstream_mean - influence * downstream_mean
-        return np.maximum(updated, 0.0)      # un MWIS con pesos negativos no tiene sentido
+        weights = np.asarray(original_weights, dtype=float)
+        if order <= 0:
+            self.last_normalization_factor = 1.0
+            return weights.copy()
+
+        adjacency = self.adjacency_matrix.astype(float)
+        upstream_sum = np.zeros_like(weights)
+        downstream_sum = np.zeros_like(weights)
+        maximum_weighted_degree = 0.0
+
+        for n in range(1, order + 1):
+            adjacency_power = np.linalg.matrix_power(adjacency, n)
+            upstream_influence = UPSTREAM_BASE_INFLUENCE * NEIGHBORHOOD_INFLUENCE_DECAY ** (n - 1)
+            downstream_influence = DOWNSTREAM_BASE_INFLUENCE * NEIGHBORHOOD_INFLUENCE_DECAY ** (n - 1)
+
+            upstream_sum += upstream_influence * (adjacency_power @ weights)
+            downstream_sum += downstream_influence * (adjacency_power.T @ weights)
+
+            upstream_degree = upstream_influence * adjacency_power.sum(axis=1)
+            downstream_degree = downstream_influence * adjacency_power.sum(axis=0)
+            maximum_weighted_degree = max(
+                maximum_weighted_degree,
+                float(upstream_degree.max(initial=0.0)),
+                float(downstream_degree.max(initial=0.0)),
+            )
+
+        nrm = 1.0 / max(1.0, maximum_weighted_degree)
+        self.last_normalization_factor = nrm
+        return weights + nrm * (upstream_sum - downstream_sum)
 
 
 # =============================================================================
@@ -509,41 +396,68 @@ class SignalController:
     def decide(self, time_seconds, simulation):
         return self._decide_with_conflict_graph(time_seconds, simulation)
 
+    # ---------- pasos reutilizables (también los usa el script de figuras) ----------
+    def compute_weights(self, time_seconds, simulation):
+        """Devuelve (medidas[M,3], pesos_locales W (Ec. 1), pesos_finales W~ (Ec. 2))."""
+        network = simulation.network
+        measurements = np.asarray([
+            simulation.measure_objective_movement(g, time_seconds)
+            for g in range(len(network.movement_info))
+        ], dtype=float)
+        local_weight_vector = np.array([
+            OBJECTIVE_WEIGHTS[name] for name in LOCAL_MEASUREMENT_ORDER
+        ], dtype=float)
+
+        # verde_previo solo existe si el movimiento integra el conjunto que lleva verde
+        # de manera ininterrumpida desde su última activación. Al salir de verde, vuelve a 0.
+        green_previous = np.zeros(len(network.movement_info), dtype=float)
+        for node, state in simulation.signal_states.items():
+            if state["active"]:
+                indices = network.movement_indices_by_node[node]
+                active_global = [indices[local_index] for local_index in state["active"]]
+                green_previous[active_global] = state["green_elapsed"]
+        delta_green = np.maximum(MAXIMUM_GREEN_SECONDS - green_previous, 0.0)
+
+        # Ecuación (1): W = θ1·Autos + θ2·Paradas + θ3·Nafta + θ4·Δverde.
+        base_weights = measurements @ local_weight_vector + OBJECTIVE_WEIGHTS["delta_verde"] * delta_green
+        # Ecuación (2): cooperación de orden k, enteramente matricial.
+        final_weights = simulation.connectivity_graph.apply_higher_order_weights(
+            base_weights, self.neighborhood_order)
+        return measurements, base_weights, final_weights
+
+    def choose_phase(self, node, final_weights, simulation):
+        """MWIS local de un cruce. Devuelve el conjunto ganador en índices LOCALES (0..7)."""
+        network = simulation.network
+        state = simulation.signal_states[node]
+        indices = network.movement_indices_by_node[node]
+        local_weights = np.asarray(final_weights)[indices].copy()
+        active_set = frozenset(state["active"] or ())
+        graph = simulation.conflict_graphs[node]
+        winner = graph.find_maximum_weight_independent_set(
+            local_weights, preferred_set=active_set if active_set else None)
+
+        # Si el ganador repite el conjunto que ya alcanzó el verde máximo, se prohíben
+        # TEMPORALMENTE esos nodos y se vuelve a resolver (el grafo original no se modifica).
+        if (active_set and winner == active_set
+                and state["green_elapsed"] + SIMULATION_STEP_SECONDS >= MAXIMUM_GREEN_SECONDS):
+            winner = graph.find_maximum_weight_independent_set(
+                local_weights, forbidden_nodes=active_set)
+        return winner
+
     # ---------- Algoritmos 1 y 2 del paper ----------
     def _decide_with_conflict_graph(self, time_seconds, simulation):
         if time_seconds < self.next_evaluation_time:
             return self.current_desired
         self.next_evaluation_time = time_seconds + UPDATE_INTERVAL_SECONDS
         network = simulation.network
-        weight_vector = np.array([OBJECTIVE_WEIGHTS[name] for name in MEASUREMENT_ORDER])
 
-        # (a) Peso original de cada movimiento, Ec. (1) + término θ·d de la Ec. (2)
-        base_weights = np.zeros(len(network.movement_info))
-        for node in network.signalized_nodes:
-            state = simulation.signal_states[node]
-            active = state["active"] or frozenset()
-            for local_index, g in enumerate(network.movement_indices_by_node[node]):
-                green_duration = state["green_elapsed"] if local_index in active else 0.0
-                d = MAXIMUM_GREEN_SECONDS - green_duration if green_duration <= MAXIMUM_GREEN_SECONDS else 0.0
-                measurement = simulation.measure_movement(g, time_seconds)
-                base_weights[g] = weight_vector @ measurement + MAXIMUM_GREEN_TERM_WEIGHT * d
+        _, _, final_weights = self.compute_weights(time_seconds, simulation)
 
-        # (b) Mezcla con el vecindario de orden 2, Ec. (4)
-        final_weights = simulation.connectivity_graph.apply_higher_order_weights(
-            base_weights, self.neighborhood_order)
-
-        # (c) Cada cruce resuelve su MWIS localmente
         for node in network.signalized_nodes:
             state = simulation.signal_states[node]
             if state["pending"] is not None and node in self.current_desired:
-                continue                                       # en despeje: ya está decidido el próximo conjunto
-            local_weights = final_weights[network.movement_indices_by_node[node]].copy()
-            preferred = state["active"] if state["active"] else None
-            if preferred and state["green_elapsed"] + UPDATE_INTERVAL_SECONDS > MAXIMUM_GREEN_SECONDS:
-                local_weights[list(preferred)] = 0.0            # verde máximo alcanzado: forzar cambio
-                preferred = None
-            self.current_desired[node] = simulation.conflict_graphs[node].find_maximum_weight_independent_set(
-                local_weights, preferred)
+                continue                                       # durante el despeje no se cambia la decisión pendiente
+            self.current_desired[node] = self.choose_phase(node, final_weights, simulation)
         return self.current_desired
 
 
@@ -572,43 +486,47 @@ class TrafficSimulation:
       1. aparecen vehículos según la demanda,  2. los que terminaron su tramo llegan a la cola de su movimiento
       (o salen de la red),  3. el controlador decide y se actualizan los semáforos (con despeje),
       4. cada movimiento en verde descarga su cola a la tasa de saturación si el tramo siguiente tiene lugar.
-    Los vehículos son diccionarios simples (sin clase propia).
     """
 
     def __init__(self, network, conflict_graphs, connectivity_graph, demand_schedule, controller, duration_seconds,
                  record_frames=False):
         self.network, self.conflict_graphs, self.connectivity_graph = network, conflict_graphs, connectivity_graph
         self.demand_schedule, self.controller, self.duration_seconds = demand_schedule, controller, duration_seconds
-        self.record_frames = record_frames      # solo la corrida que se va a animar necesita guardar cuadros
+        self.record_frames = record_frames
         count = len(network.movement_info)
         self.movement_queues = [deque() for _ in range(count)]
-        self.movement_credit = [0.0] * count                         # "crédito" de descarga acumulado
-        self.recent_arrival_times = [deque() for _ in range(count)]  # lazos detectores
+        self.movement_credit = [0.0] * count
         self.movement_saturation_rate = [
             SATURATION_FLOW_VEHICLES_PER_SECOND_PER_LANE
             * max(1, network.links[(info["from"], info["node"])]["lanes"] - 1) for info in network.movement_info]
         self.link_keys = list(network.links.keys())
-        self.link_vehicles = {key: deque() for key in self.link_keys}   # vehículos en tránsito por tramo
-        self.link_occupancy = {key: 0 for key in self.link_keys}        # en tránsito + en cola
-        self.signal_states = {node: {"active": None, "pending": None, "clearance": 0.0, "green_elapsed": 0.0}
-                              for node in network.signalized_nodes}
+        self.link_vehicles = {key: deque() for key in self.link_keys}
+        self.link_occupancy = {key: 0 for key in self.link_keys}
+        self.signal_states = {
+            node: {"active": None, "pending": None, "clearance": 0.0,
+                   "green_elapsed": 0.0}
+            for node in network.signalized_nodes
+        }
         self.all_vehicles, self.completed_vehicles = [], []
         self.queue_time_series, self.completed_time_series = [], []
         self.frames, self.phase_log = [], []
 
-    # ---------- medición que usan los controladores ----------
-    def measure_movement(self, global_index, time_seconds):
-        """Devuelve [Q, Vol, WT, ST, FC] del movimiento (orden de MEASUREMENT_ORDER) en el instante t."""
-        arrivals = self.recent_arrival_times[global_index]
-        while arrivals and arrivals[0] < time_seconds - DETECTOR_WINDOW_SECONDS:
-            arrivals.popleft()
+    def measure_objective_movement(self, global_index, time_seconds):
+        """Devuelve [Autos, Paradas, Nafta] para el peso local W[m,t]."""
         queue = self.movement_queues[global_index]
-        waits = [time_seconds - v["join_time"] for v in queue]
-        stops = [v["stops"] + (1 if w > 0 else 0) for v, w in zip(queue, waits)]
-        fuel = sum(IDLE_FUEL_MILLILITERS_PER_SECOND * w + RESTART_FUEL_MILLILITERS for w in waits)
-        return np.array([len(queue), len(arrivals), sum(waits), float(np.mean(stops)) if stops else 0.0, fuel])
+        waits = [time_seconds - vehicle["join_time"] for vehicle in queue]
+        stops = [vehicle["stops"] + (1 if wait > 0 else 0)
+                 for vehicle, wait in zip(queue, waits)]
+        fuel = sum(
+            IDLE_FUEL_MILLILITERS_PER_SECOND * wait + RESTART_FUEL_MILLILITERS
+            for wait in waits
+        )
+        return np.array([
+            len(queue),
+            float(np.mean(stops)) if stops else 0.0,
+            fuel,
+        ], dtype=float)
 
-    # ---------- ciclo principal ----------
     def run(self):
         self.controller.prepare(self)
         spawn_pointer, next_frame_time = 0, 0.0
@@ -650,7 +568,7 @@ class TrafficSimulation:
                 vehicle["fuel"] += CRUISE_FUEL_MILLILITERS_PER_SECOND * (
                     self.network.links[key]["length_meters"] / FREE_FLOW_SPEED_METERS_PER_SECOND)
                 route, index = vehicle["route"], vehicle["link_index"]
-                if index + 1 == len(route) - 1:                    # llegó a un extremo: sale de la red
+                if index + 1 == len(route) - 1:
                     vehicle["completion"] = t
                     self.link_occupancy[key] -= 1
                     self.completed_vehicles.append(vehicle)
@@ -658,18 +576,14 @@ class TrafficSimulation:
                 g = self.network.movement_index[(route[index + 1], route[index], route[index + 2])]
                 vehicle["join_time"] = t
                 self.movement_queues[g].append(vehicle)
-                arrivals = self.recent_arrival_times[g]
-                arrivals.append(t)
-                while arrivals and arrivals[0] < t - DETECTOR_WINDOW_SECONDS:
-                    arrivals.popleft()
 
     def _update_signal_states(self, t, desired_sets):
         for node, state in self.signal_states.items():
             desired = desired_sets[node]
-            if state["active"] is None:                            # arranque sin tiempo perdido
+            if state["active"] is None:
                 self._activate(node, state, desired, t)
                 continue
-            if state["clearance"] > 0:                             # amarillo + todo-rojo
+            if state["clearance"] > 0:
                 state["clearance"] -= SIMULATION_STEP_SECONDS
                 if state["clearance"] <= 0:
                     self._activate(node, state, state["pending"], t)
@@ -683,11 +597,11 @@ class TrafficSimulation:
     def _activate(self, node, state, local_set, t):
         state["active"], state["green_elapsed"] = local_set, 0.0
         indices = self.network.movement_indices_by_node[node]
-        self.phase_log.append((t, node, tuple(indices[i] for i in sorted(local_set))))   # "quién ganó" en t
+        self.phase_log.append((t, node, tuple(indices[i] for i in sorted(local_set))))
 
     def _downstream_accepts(self, vehicle, t):
         route, index = vehicle["route"], vehicle["link_index"]
-        if route[index + 2] in self.network.boundary_street:       # el tramo siguiente sale de la red
+        if route[index + 2] in self.network.boundary_street:
             return True
         next_key = (route[index + 1], route[index + 2])
         link = self.network.links[next_key]
@@ -738,7 +652,7 @@ class TrafficSimulation:
         waiting = sum(v["waiting"] for v in self.all_vehicles)
         stops = sum(v["stops"] for v in self.all_vehicles)
         fuel = sum(v["fuel"] for v in self.all_vehicles)
-        for queue in self.movement_queues:                         # los que siguen en cola al terminar
+        for queue in self.movement_queues:
             for vehicle in queue:
                 extra = self.duration_seconds - vehicle["join_time"]
                 waiting += extra
@@ -767,13 +681,8 @@ def load_background_image():
         candidates = sorted(sum((glob.glob(os.path.join(SOURCE_DIRECTORY, ext))
                                  for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp")), []))
         path = candidates[0] if candidates else None
-    if path is None:
-        print(f"AVISO: no hay imagen en {SOURCE_DIRECTORY}; se usa un fondo en blanco.")
-        return None, *FALLBACK_CANVAS_SIZE_PIXELS
     image = matplotlib_image.imread(path)
     original_height, original_width = image.shape[0], image.shape[1]
-    # Se submuestrea para que la animación sea fluida; el extent de imshow mantiene las coordenadas
-    # en píxeles de la imagen ORIGINAL, así que STREETS no cambia.
     step = max(1, original_width // MAXIMUM_BACKGROUND_WIDTH_PIXELS)
     return image[::step, ::step], original_width, original_height
 
@@ -798,7 +707,7 @@ def draw_background(axes, show_pixel_ticks=False):
 def show_calibration_view(network):
     """Solo calles y nodos sobre la imagen, con sus parámetros, para ajustar STREETS a ojo."""
     figure, axes = plt.subplots(figsize=(15, 8.5))
-    draw_background(axes, show_pixel_ticks=True)   # ejes en píxeles reales para leer coordenadas
+    draw_background(axes, show_pixel_ticks=True)
     for street_name, parameters in STREETS.items():
         start, direction, length = get_street_geometry(parameters)
         end = start + direction * length
@@ -820,14 +729,7 @@ def format_phase_event(event, node_codes, network):
 
 
 def run_live_simulation_view(network, result, duration_seconds, interval_milliseconds):
-    """
-    Proyecta la corrida grabada sobre la imagen. Mapa: SOLO calles (color = ocupación) y flechas verdes
-    (movimientos habilitados), ubicadas al costado de la calle. Panel de texto a la derecha, fuera del mapa:
-    t, gradiente de colores, cruces con su conjunto ganador actual y registro de los últimos cambios de fase.
-    Al llegar a T se reinicia desde t = 0 (es la misma corrida grabada reproducida de nuevo).
-    Usa blitting: el fondo (imagen enorme) se dibuja una sola vez y por cuadro solo se redibujan las calles,
-    las flechas y los textos, lo que la hace mucho más liviana.
-    """
+    """Proyecta la corrida grabada sobre la imagen (calles = ocupación, flechas verdes = movimientos habilitados)."""
     frames, phase_log = result["frames"], result["phase_log"]
     node_codes = {node: f"C{i + 1}" for i, node in enumerate(network.signalized_nodes)}
 
@@ -841,7 +743,6 @@ def run_live_simulation_view(network, result, duration_seconds, interval_millise
 
     draw_background(map_axes)
 
-    # Calles: un segmento por sentido, corrido a la derecha del eje (circulación por la derecha)
     segments = []
     for from_node, to_node in network.links:
         start, end = network.node_positions[from_node], network.node_positions[to_node]
@@ -853,9 +754,6 @@ def run_live_simulation_view(network, result, duration_seconds, interval_millise
     streets_collection.set_array(np.zeros(len(segments)))
     map_axes.add_collection(streets_collection)
 
-    # Semáforos: una flecha verde pequeña por movimiento, AL COSTADO de la calle (fuera de la banda de color);
-    # visible solo cuando el movimiento está habilitado. "recto" sigue el sentido de marcha; "izquierda" se
-    # inclina hacia la calle por la que sale el vehículo.
     stop_lines = network.compute_stop_line_positions()
     arrow_patches = []
     for index, info in enumerate(network.movement_info):
@@ -871,7 +769,6 @@ def run_live_simulation_view(network, result, duration_seconds, interval_millise
         map_axes.add_patch(patch)
         arrow_patches.append(patch)
 
-    # Gradiente (leyenda de colores) en el panel, fuera del mapa
     colorbar = figure.colorbar(streets_collection, cax=gradient_axes, orientation="horizontal")
     colorbar.set_label("ocupación del tramo: 0 = libre ... 1 = lleno", fontsize=9)
 
@@ -887,7 +784,7 @@ def run_live_simulation_view(network, result, duration_seconds, interval_millise
     def update(frame_index):
         time_seconds, occupancy_ratio, green_flags = frames[frame_index]
         if frame_index == 0:
-            playback_counter[0] += 1                      # se reinició: empieza una nueva reproducción
+            playback_counter[0] += 1
         streets_collection.set_array(occupancy_ratio)
         for index, patch in enumerate(arrow_patches):
             patch.set_visible(bool(green_flags[index]))
@@ -930,7 +827,6 @@ def main():
     parser.add_argument("--calibrate", action="store_true", help="solo muestra las calles sobre la imagen")
     arguments = parser.parse_args()
 
-    # La simulación se ejecuta directamente sobre los 6 cruces de la imagen, usando CFG2.
     network = TrafficNetwork()
     if arguments.calibrate:
         show_calibration_view(network)
@@ -942,13 +838,8 @@ def main():
     print(f"Vehículos generados: {len(demand)}")
 
     result = TrafficSimulation(
-        network,
-        conflict_graphs,
-        connectivity_graph,
-        demand,
-        SignalController(),
-        arguments.duration,
-        record_frames=True
+        network, conflict_graphs, connectivity_graph, demand, SignalController(),
+        arguments.duration, record_frames=True
     ).run()
 
     print(f"[CFG2] cola={result['mean_queue_length_vehicles']:.1f}  "
@@ -957,7 +848,6 @@ def main():
           f"paradas={result['mean_stops_per_vehicle']:.2f}  "
           f"fuel={result['mean_fuel_milliliters_per_vehicle']:.1f}ml")
 
-    # La proyección, el panel y la animación conservan el diseño original.
     animation = run_live_simulation_view(network, result, arguments.duration, arguments.animation_interval_ms)
     plt.show()
 
